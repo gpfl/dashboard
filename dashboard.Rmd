@@ -1,0 +1,531 @@
+---
+output: 
+  flexdashboard::flex_dashboard:
+    theme: cosmo
+params:
+  cultura: "Soja"
+  sufixo: ""
+title: "Safra"
+---
+
+
+```{r setup2, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+options(knitr.duplicate.label = 'allow')
+
+suppressMessages(suppressWarnings(require(data.table)))
+suppressMessages(suppressWarnings(require(dplyr)))
+suppressMessages(suppressWarnings(require(ggplot2)))
+suppressMessages(suppressWarnings(require(ggridges)))
+suppressMessages(suppressWarnings(require(RColorBrewer)))
+suppressMessages(suppressWarnings(require(knitr)))
+suppressMessages(suppressWarnings(require(fitdistrplus)))
+suppressMessages(suppressWarnings(require(forcats)))
+suppressMessages(suppressWarnings(require(DT)))
+suppressMessages(suppressWarnings(require(plotly)))
+
+
+if(.Platform$OS.type == "unix") {
+  pTemp <- "/XL7/RAWDATA/SLC/TEMPORARIO"
+  pProc <- "/XL7/RAWDATA/SLC/PROCESSAMENTO"
+} else {
+  pTemp <- "X://RAWDATA/SLC/TEMPORARIO"
+  pProc <- "X://RAWDATA/SLC/PROCESSAMENTO"
+}
+
+##
+assign("combo",setDT(readRDS(paste0(pProc,"/Recomendacoes_Completo_Final_Epocas.rds")))[, .(Grp_Faz,UF,Fazenda,Cultivar,Cenario_Climatico,Grupo_Solo,Tipo_Ciclo,Epoca,Classif_Plantio = Classif_Plantio_Soja, IP,IP_Sup,IP_Inf,Yield)])
+assign("modelo",readRDS(paste0(pProc,"/Modelos_RF2_01_6.rds")))
+assign("campos_mod2",readRDS(paste0(pProc,"/campos_modelo.rds")))
+
+combo[, ":="(min_int = log(IP_Inf + 1),
+                 max_int = log(IP_Sup + 1))]
+combo[, range_int := max_int - min_int]
+
+combo$Yield = log(combo$Yield + 1)
+
+if(params$cultura != "Milho") combo$Tipo_Ciclo <- factor(combo$Tipo_Ciclo, levels = c("Precoce","Medio","Tardio"),
+                                                         labels = c("Ciclo1","Ciclo2","Ciclo3"), ordered = T)
+
+combo$Grupo_Solo <- factor(combo$Grupo_Solo, levels = c("Solo_Arenoso","Solo_Medio","Solo_Argiloso","Solo_Muito_Argiloso"),
+                           labels = c("Solo1","Solo2","Solo3","Solo4"), ordered = T)
+
+combo$Fazenda <- factor(combo$Fazenda, labels = paste0("Fazenda",1:15))
+
+combo$Cenario_Climatico <- factor(combo$Cenario_Climatico, labels = c("Cenario3","Cenario2","Cenario1"), ordered = T)
+
+combo$Classif_Plantio <- factor(combo$Classif_Plantio, labels = c("Classif1",
+                                                                  "Classif2",
+                                                                  "Classif3",
+                                                                  "Classif4",
+                                                                  "Classif5"), ordered = T)
+
+if(identical(levels(as.factor(combo$UF)),c("UF_BA","UF_GO","UF_MA","UF_MS","UF_MT"))){
+  combo$UF <- factor(combo$UF, levels = c("UF_BA","UF_GO","UF_MA","UF_MS","UF_MT"),
+                     labels = c("Estado1","Estado2","Estado3","Estado4","Estado5"))
+} else {
+  combo$UF <- factor(combo$UF,labels = paste0("Estado",1:length(unique(combo$UF))))
+}
+
+####### TOP CULTIVARES
+#
+anos_recentes <- rep(year(Sys.Date()),5) - 1:5
+
+```
+
+
+# Cenário Climático {data-navmenu="Recortes" data-icon="fa-table"}
+## {data-width=3000}
+### Sumarização por Cenário Climático
+
+```{r}
+
+valid_cenario <- combo[, .(Yield_Prev_Mean   = round(mean(Yield, na.rm=T), 2),
+            Yield_Prev_Median = round(median(Yield, na.rm=T), 2),
+            Yield_Prev_Max    = round(max(Yield, na.rm=T), 2),
+            Yield_Prev_Min    = round(min(Yield, na.rm=T), 2),
+            Yield_Prev_SD     = round(sd(Yield,   na.rm=T), 2),
+            Yield_Prev_CV     = round((sd(Yield,   na.rm=T)/round(mean(Yield, na.rm=T))), 2),
+           Max_interv = round(mean(max_int, na.rm = T),2),
+           Min_interv = round(mean(min_int, na.rm = T),2)),
+        by=Cenario_Climatico][order(-Cenario_Climatico)]
+
+# kable(valid_cenario)
+datatable(valid_cenario, options = list(pageLength = nrow(valid_cenario),dom = 'rt'))
+
+```
+
+### Distribuição Empírica da Produtividade por Cenário Climático {.no-padding}
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.width= 12, fig.height= 8}
+# distribuição das Produtividades
+
+color_palette <- colorRampPalette(brewer.pal(length(unique(combo$Cenario_Climatico)),"Paired"))
+ggplot(combo) +
+  geom_density_ridges(aes(x = Yield, y = as.factor(Cenario_Climatico),
+                          fill = Cenario_Climatico), col = 'grey65', size = 0.8) +
+  geom_vline(xintercept = mean(combo$Yield, na.rm = T), linetype = 'dashed', size = 0.8, color = 'black', alpha = 0.3) +
+  scale_fill_manual(values = color_palette(length(unique(combo$Cenario_Climatico)))) +
+  scale_y_discrete(expand = c(0.01, 0)) +
+  scale_x_continuous(expand = c(0.01, 0)) +
+  labs(title = "", x = "", y = "") +
+  theme_ridges(grid = FALSE, center_axis_labels = T) +
+  theme(text = element_text(size=24),legend.position = 'none')
+
+```
+
+
+##
+### Intervalos de Confiança Estimados, por Cenário Climático
+
+```{r echo = FALSE, fig.width=10, fig.height= 20}
+ggplot(valid_cenario) +
+  geom_pointrange(aes(x = Cenario_Climatico,
+                      ymin = Min_interv,
+                      ymax = Max_interv,
+                      y = Yield_Prev_Mean,
+                      color = Cenario_Climatico), size = 1.2) +
+  geom_hline(yintercept = mean(valid_cenario[, Yield_Prev_Mean]), linetype = 'dashed', size = 1.2, col = 'darkgrey') +
+  labs(title = "", x = "", y = "") +
+  theme_minimal() +
+  theme(legend.position = 'none', text = element_text(size = 26)) +
+  coord_flip()
+
+```
+
+
+# Fazenda {data-navmenu="Recortes" data-icon="fa-table"}
+
+## {data-width=3000}
+### Sumarização por Fazenda
+
+```{r}
+
+valid_fazenda <-
+  unique(combo[, .(Yield_Prev_Mean   = round(mean(Yield, na.rm=T), 2),
+            Yield_Prev_Median = round(median(Yield, na.rm=T), 2),
+            Yield_Prev_Max    = round(max(Yield, na.rm=T), 2),
+            Yield_Prev_Min    = round(min(Yield, na.rm=T), 2),
+            Yield_Prev_SD     = round(sd(Yield,   na.rm=T), 2),
+            Yield_Prev_CV     = round((sd(Yield,   na.rm=T)/round(mean(Yield, na.rm=T))), 2),
+           Max_interv = round(mean(max_int, na.rm = T),2),
+           Min_interv = round(mean(min_int, na.rm = T),2)),
+        by=.(Fazenda)][order(-Yield_Prev_Mean)])
+
+# kable(valid_cenario)
+datatable(valid_fazenda, options = list(pageLength = nrow(valid_fazenda),dom = 'rt'))
+
+```
+
+### Distribuição Empírica da Produtividade por Fazenda {.no-padding}
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.width= 12, fig.height= 8}
+# distribuição das Produtividades
+
+color_palette <- colorRampPalette(brewer.pal(length(combo[,unique(Fazenda)]),"Paired"))
+ggplot(combo) +
+  geom_density_ridges(aes(x = Yield, y = as.factor(Fazenda),
+                          fill = Fazenda), col = 'grey65', size = 0.8) +
+  geom_vline(xintercept = mean(combo$Yield, na.rm = T), linetype = 'dashed', size = 0.8, color = 'black', alpha = 0.3) +
+  scale_fill_manual(values = color_palette(length(combo[,unique(Fazenda)]))) +
+  scale_y_discrete(expand = c(0.01, 0)) +
+  scale_x_continuous(expand = c(0.01, 0)) +
+  labs(title = "", x = "", y = "") +
+  theme_ridges(grid = FALSE, center_axis_labels = T) +
+  theme(text = element_text(size=24),legend.position = 'none')
+
+```
+
+
+##
+### Intervalos de Confiança Estimados, por Fazenda
+
+```{r echo = FALSE, fig.width=10, fig.height= 20}
+ggplot(valid_fazenda) +
+  geom_pointrange(aes(x = Fazenda,
+                      ymin = Min_interv,
+                      ymax = Max_interv,
+                      y = Yield_Prev_Mean,
+                      color = Fazenda), size = 1.2) +
+  geom_hline(yintercept = mean(valid_cenario[, Yield_Prev_Mean]), linetype = 'dashed', size = 1.2, col = 'darkgrey') +
+  labs(title = "", x = "", y = "") +
+  theme_minimal() +
+  theme(legend.position = 'none', text = element_text(size = 26)) +
+  coord_flip()
+
+```
+
+
+
+
+# Solo (Grupo) {data-navmenu="Recortes" data-icon="fa-table"}
+## {data-width=3000}
+### Sumarização por Solo (Grupo)
+
+```{r results = 'asis', echo = FALSE}
+valid_solo <- combo[!is.na(Grupo_Solo), .(Yield_Prev_Mean   = round(mean(Yield, na.rm=T), 2),
+            Yield_Prev_Median = round(median(Yield, na.rm=T), 2),
+            Yield_Prev_Max    = round(max(Yield, na.rm=T), 2),
+            Yield_Prev_Min    = round(min(Yield, na.rm=T), 2),
+            Yield_Prev_SD     = round(sd(Yield,   na.rm=T), 2),
+            Yield_Prev_CV     = round((sd(Yield,   na.rm=T)/round(mean(Yield, na.rm=T))), 2),
+           Max_interv = round(mean(max_int, na.rm = T),2),
+           Min_interv = round(mean(min_int, na.rm = T),2)),
+        by=Grupo_Solo][order(-Grupo_Solo)]
+
+invisible(droplevels(valid_solo$Grupo_Solo))
+
+#kable(valid_solo)
+datatable(valid_solo, options = list(pageLength = nrow(valid_solo),dom = 'rt'))
+```
+
+### Distribuição Empírica da Produtividade por Solo (Grupo) {.no-padding}
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.width= 12, fig.height= 8}
+# distribuição das Produtividades
+color_palette <- colorRampPalette(brewer.pal(8,"Set3"))
+ggplot(combo[!is.na(Grupo_Solo)]) +
+  geom_density_ridges(aes(x = Yield, y = Grupo_Solo, fill = Grupo_Solo), col = 'grey65', size = 0.8) +
+  geom_vline(xintercept = mean(combo$Yield, na.rm = T), linetype = 'dashed', size = 0.8, color = 'black', alpha = 0.3) +
+  scale_fill_manual(values = color_palette(6)) +
+  scale_x_continuous(breaks = sort(round(c(seq(min(combo$Yield, na.rm = T),
+                                     max(combo$Yield, na.rm = T),
+                                     length.out = 4),
+                                     mean(combo$Yield, na.rm = T),0)))) +
+  scale_y_discrete(expand = c(0.01, 0)) +
+  scale_x_continuous(expand = c(0.01, 0)) +
+  labs(title = "", x = "", y = "") +
+  theme_ridges(grid = FALSE, center_axis_labels = T) +
+  theme(text = element_text(size=22),legend.position = 'none')
+
+```
+
+##
+### Intervalos de Confiança Estimados, por Solo (Grupo)
+
+```{r echo = FALSE, fig.width=10, fig.height= 20}
+ggplot(valid_solo) +
+  geom_pointrange(aes(x = Grupo_Solo,
+                      ymin = Min_interv,
+                      ymax = Max_interv,
+                      y = Yield_Prev_Mean,
+                      color = levels(Grupo_Solo)), size = 1.2) +
+  geom_hline(yintercept = mean(valid_solo[, Yield_Prev_Mean]), linetype = 'dashed', size = 1.2, col = 'darkgrey') +
+  theme_minimal() +
+  theme(legend.position = 'none', text = element_text(size = 26)) +
+  labs(title = "", x = "", y = "") +
+  coord_flip()
+
+```
+
+
+# Tipo de Ciclo {data-navmenu="Recortes" data-icon="fa-table"}
+## {data-width=3000}
+### Sumarização por Tipo de Ciclo
+
+```{r results = 'asis', echo = FALSE}
+if(params$cultura != "Milho"){
+valid_ciclo <- combo[!is.na(Tipo_Ciclo), .(Yield_Prev_Mean   = round(mean(Yield, na.rm=T), 2),
+            Yield_Prev_Median = round(median(Yield, na.rm=T), 2),
+            Yield_Prev_Max    = round(max(Yield, na.rm=T), 2),
+            Yield_Prev_Min    = round(min(Yield, na.rm=T), 2),
+            Yield_Prev_SD     = round(sd(Yield,   na.rm=T), 2),
+            Yield_Prev_CV     = round((sd(Yield,   na.rm=T)/round(mean(Yield, na.rm=T))), 2),
+           Max_interv = round(mean(max_int, na.rm = T),2),
+           Min_interv = round(mean(min_int, na.rm = T),2)),
+        by=Tipo_Ciclo][order(-Tipo_Ciclo)]
+#kable(valid_ciclo)
+datatable(valid_ciclo, options = list(pageLength = nrow(valid_ciclo),dom = 'rt'))
+}
+```
+
+### Distribuição Empírica da Produtividade por Tipo de Ciclo {.no-padding}
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.width= 12, fig.height= 8}
+# distribuição das Produtividades
+if(params$cultura != "Milho"){
+color_palette <- colorRampPalette(brewer.pal(9,"Paired"))
+ggplot(combo[!is.na(Tipo_Ciclo)]) +
+  geom_density_ridges(aes(x = Yield, y = as.factor(Tipo_Ciclo), fill = Tipo_Ciclo), col = 'grey65', size = 0.8) +
+  geom_vline(xintercept = mean(combo[!is.na(Tipo_Ciclo), Yield], na.rm = T), linetype = 'dashed', size = 0.8, color = 'black', alpha = 0.3) +
+  scale_fill_manual(values = color_palette(9)) +
+  scale_y_discrete(expand = c(0.01, 0)) +
+  scale_x_continuous(expand = c(0.01, 0)) +
+  labs(title = "", x = "", y = "") +
+  theme_ridges(grid = FALSE, center_axis_labels = T) +
+  theme(text = element_text(size=22),legend.position = 'none')
+}
+```
+
+##
+### Intervalos de Confiança Estimados, por Tipo de Ciclo
+
+```{r echo = FALSE, fig.width=10, fig.height= 20}
+if(params$cultura != "Milho"){
+ggplot(valid_ciclo) +
+  geom_pointrange(aes(x = Tipo_Ciclo,
+                      ymin = Min_interv,
+                      ymax = Max_interv,
+                      y = Yield_Prev_Mean,
+                      color = Tipo_Ciclo), size = 1.2) +
+  geom_hline(yintercept = mean(valid_ciclo[, Yield_Prev_Mean]), linetype = 'dashed', size = 1.2, col = 'darkgrey') +
+  labs(title = "", x = "", y = "") +
+  theme_minimal() +
+  theme(legend.position = 'none', text = element_text(size = 26)) +
+  coord_flip()
+}
+```
+
+
+
+# Importância das Variáveis {data-navmenu="Estatísticas" data-icon="fa-signal"}
+
+Column
+-----------------------------------------------------------------------
+
+### Importância das Variáveis
+
+```{r}
+modelo <- modelo[[length(modelo)]]
+varimp <- as.data.table(modelo$finalModel$importance, keep.rownames = T)
+varimp <- varimp[order(-`%IncMSE`), .(Variavel = rn, `%IncMSE`, IncNodePurity)]
+varimp$Variavel <- factor(varimp$Variavel, labels = paste0("Variavel",1:length(varimp$Variavel)))
+varimp[, Variavel := factor(Variavel, levels = rev(varimp$Variavel), ordered = T)]
+
+datatable(varimp, options = list(pageLength = 30, dom = 't')) %>% formatRound(columns = 1:3, digits = 2)
+
+```
+
+Column
+-----------------------------------------------------------------------
+
+### {.no-padding data-width=300}
+
+```{r}
+plot_ly(varimp[1:30], x = ~`%IncMSE`, y = ~Variavel, type = "bar", marker = list(color = 'rgb(29, 165, 76)')) %>%
+  layout(xaxis = list(title = ""), yaxis = list(title =""))
+```
+
+Column
+-----------------------------------------------------------------------
+
+### Percentage Increase of MSE 
+
+Cada árvore tem uma amostra de dados OOB (Out of Bag) que não é usada durante sua construção. Essa amostra é usada para calcular a importância das variáveis uma a uma.     
+
+Primeiro é medido o erro de previsão dessa amostra OOB, então o valor de uma variável é embaralhado aleatoriamente enquanto as outras permanecem iguais. O erro de previsão é novamente medido, e o diferencial dos erros de previsão é medido.      
+
+Depois de sucessivos embaralhamentos aleatórios é então calculado o percentual médio de aumento do Erro Médio Quadrático (Percentage Increase of MSE).      
+
+Essa é uma medida que indica o impacto no erro do modelo quando a variável em questão é retirada.
+
+### Increase in Node Purity
+
+Quando a árvore é construída, a decisão de usar qual variável para cada nó de decisão usa o cálculo de 'Node Purity'. Para cada variável, a queda da Soma dos Quadrados dos Erros (SQE) é acumulada a cada nó de decisão. Essa soma então é dividida pelo número de árvores para obtermos uma média.      
+
+A escala dessa medida é irrelevante, apenas o valor relativo entre as variáveis é importante.
+
+
+### Informações do Modelo
+
+```{r}
+infos_modelo <- data.table(Info = c("Modelo","Tipo de Modelo","Métrica de avaliação","Número de árvores","Número total de variáveis","Número de variáveis utilizadas","Número de nós gerados"), 
+           Valor = c(modelo$modelInfo$label, modelo$modelType, paste(modelo$perfNames, collapse = ", "), modelo$finalModel$ntree, length(campos_mod2), length(modelo$finalModel$xNames), modelo$finalModel$forest$nrnodes))
+
+kable(infos_modelo)
+```
+
+# gráfico de Cullen & Frey {data-navmenu="Estatísticas" data-icon="fa-signal"}
+
+## {data-width=1800}
+
+###
+
+```{r}
+set.seed(123)
+yield_sample <- sample(combo$Yield, 40000)
+
+fit.norm <- fitdist(yield_sample, "norm")
+fit.lnorm <- fitdist(yield_sample, "lnorm")
+fit.gamma <- fitdist(yield_sample, "gamma")
+fit.logis <- fitdist(yield_sample, "logis")
+
+
+
+yield_dist <- descdist(combo$Yield, boot = 100)
+
+```
+
+##
+### Estatísticas da Estimação da Produtividade
+```{r}
+kable(data.frame(Statistics = c("Média","Mediana","Mínimo","Máximo","Desvio Padrão (Est.)","Assimetria (Est.)", "Curtose (Est.)"),
+           Values = round(c(yield_dist$mean,yield_dist$median,yield_dist$min,yield_dist$max,yield_dist$sd,yield_dist$skewness,yield_dist$kurtosis),2)))
+```
+
+### gráfico de Cullen e Frey
+O gráfico de Cullen e Frey compara a Distribuição Empírica da variável de interesse com distribuições teóricas conhecidas (levando em conta assimetria e curtose).
+
+No gráfico ao lado, quando o ponto azul se encontra muito próximo de uma distribuição conhecida podemos supor que nossos dados se distribuem aproximadamente da mesma forma.
+
+
+# Densidade Empírica {data-navmenu="Estatísticas" data-icon="fa-signal"}
+
+## {data-width=1800}
+
+###
+
+```{r, fig.width=12, fig.height=8}
+plot.legend <- c("Normal", "Lognormal", "Gamma","Logística")
+dens <- denscomp(list(fit.norm, fit.lnorm, fit.gamma, fit.logis), legendtext = plot.legend, plotstyle = "ggplot", breaks = 50, datacol = 'lightskyblue', fitcol = c("red","blue","green", "orange"))
+dens +
+    theme_light() +
+  theme(text = element_text(size = 16)) +
+  scale_size_manual(values = c(1.5, 1.5, 1.5, 1.5)) +
+  labs(title = "Histograma da Densidade da Produtividade Esperada e distribuições teóricas em Linha",
+       x = "", y = "Densidade")
+
+
+```
+
+##
+### Estatísticas da Estimação da Produtividade
+```{r}
+kable(data.frame(Statistics = c("Média","Mediana","Mínimo","Máximo","Desvio Padrão (Est.)","Assimetria (Est.)", "Curtose (Est.)"),
+           Values = round(c(yield_dist$mean,yield_dist$median,yield_dist$min,yield_dist$max,yield_dist$sd,yield_dist$skewness,yield_dist$kurtosis),2)))
+```
+
+### Densidade Empírica
+
+A Função de Densidade Empírica descreve a distribuição amostral dos dados analisados. No problema em questão temos a densidade Empírica da Produtividade Esperada.
+
+
+# distribuição Cumulativa Empírica {data-navmenu="Estatísticas" data-icon="fa-signal"}
+
+## {data-width=1800}
+
+###
+
+```{r, fig.width=12, fig.height=8}
+cdf <- cdfcomp (list(fit.norm, fit.lnorm, fit.gamma, fit.logis), legendtext = plot.legend,
+                lines01 = T, plotstyle = "ggplot", fitcol = c("red","blue","green", "orange"))
+cdf +
+  theme_light() +
+  theme(text = element_text(size = 16)) +
+  scale_size_manual(values = c(1.5, 1.5, 1.5, 1.5)) +
+  xlab("")
+
+```
+
+##
+### Estatísticas da Estimação da Produtividade
+
+```{r}
+kable(data.frame(Statistics = c("Média","Mediana","Mínimo","Máximo","Desvio Padrão (Est.)","Assimetria (Est.)", "Curtose (Est.)"),
+           Values = round(c(yield_dist$mean,yield_dist$median,yield_dist$min,yield_dist$max,yield_dist$sd,yield_dist$skewness,yield_dist$kurtosis),2)))
+```
+
+### distribuição Cumulativa Empírica
+
+A distribuição Comulativa descreve a soma acumulada das suas densidades. é uma função entre [0,1] em que a velocidade de convergência para 1 define a distribuição dos dados estatísticos.
+
+
+# Q-Q Plot {data-navmenu="Estatísticas" data-icon="fa-signal"}
+
+## {data-width=1800}
+
+###
+
+```{r, fig.width=12, fig.height=8}
+qq <- qqcomp(list(fit.norm, fit.lnorm, fit.gamma, fit.logis),
+             legendtext = plot.legend,plotstyle = "ggplot", fitcol = c("red","blue","green", "orange"))
+qq +
+  theme_light() +
+  ggtitle("Q-Q Plot") +
+  scale_size_manual(values = c(1.5, 1.5, 1.5, 1.5)) +
+  theme(text = element_text(size = 16))
+```
+
+##
+### Estatísticas da Estimação da Produtividade
+
+```{r}
+kable(data.frame(Statistics = c("Média","Mediana","Mínimo","Máximo","Desvio Padrão (Est.)","Assimetria (Est.)", "Curtose (Est.)"),
+           Values = round(c(yield_dist$mean,yield_dist$median,yield_dist$min,yield_dist$max,yield_dist$sd,yield_dist$skewness,yield_dist$kurtosis),2)))
+```
+
+### Q-Q Plot
+É o gráfico dos quantis dos dados empíricos contra os quantis dos dados teóricos. Quanto mais a os dados se mantém no eixo de 45 graus (y = x), melhor é o ajuste.
+
+Nesse caso o Q-Q Plot mede o quanto os dados empíricos se aproximam das distribuições teóricas em questão (Normal, LogNormal, Gamma e Logística).
+
+
+# P-P Plot {data-navmenu="Estatísticas" data-icon="fa-signal"}
+
+## {data-width=1800}
+
+###
+
+```{r, fig.width=12, fig.height=8}
+pp <- ppcomp  (list(fit.norm, fit.lnorm, fit.gamma, fit.logis), legendtext = plot.legend,
+               plotstyle = "ggplot", fitcol = c("red","blue","green", "orange"))
+pp +
+  theme_light() +
+  ggtitle("P-P Plot") +
+  scale_size_manual(values = c(1.5, 1.5, 1.5, 1.5)) +
+  theme(text = element_text(size = 16))
+```
+
+##
+### Estatísticas da Estimação da Produtividade
+
+```{r}
+kable(data.frame(Statistics = c("Média","Mediana","Mínimo","Máximo","Desvio Padrão (Est.)","Assimetria (Est.)", "Curtose (Est.)"),
+           Values = round(c(yield_dist$mean,yield_dist$median,yield_dist$min,yield_dist$max,yield_dist$sd,yield_dist$skewness,yield_dist$kurtosis),2)))
+```
+
+
+### P-P Plot
+
+É um gráfico de probabilidades que avalia o quanto dos conjuntos de dados são parecidos, plotando as duas distribuições cumulativas uma contra a outra. O P-P Plot ajuda a avaliar a assimetria de uma distribuição.
+
